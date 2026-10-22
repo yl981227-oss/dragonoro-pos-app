@@ -59,7 +59,9 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        webView.loadUrl(START_URL);
+        // Append a timestamp so the WebView never serves a stale cached page.
+        // This lets every web update reach all installed APPs on next launch.
+        webView.loadUrl(START_URL + "?t=" + System.currentTimeMillis());
     }
 
     @Override
