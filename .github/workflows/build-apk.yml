@@ -19,18 +19,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK packages
-        run: |
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
+
+      - name: Resolve Android SDK
+        run: |
+          for p in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk "$HOME/android-sdk"; do
+            if [ -n "$p" ] && [ -d "$p" ]; then
+              echo "Using SDK at: $p"
+              echo "ANDROID_HOME=$p" >> $GITHUB_ENV
+              echo "ANDROID_SDK_ROOT=$p" >> $GITHUB_ENV
+              break
+            fi
+          done
+          echo "platforms available:"
+          ls "$ANDROID_HOME/platforms" 2>/dev/null || true
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
