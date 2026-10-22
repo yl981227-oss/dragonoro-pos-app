@@ -1,6 +1,7 @@
 package com.dragonoro.pos;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
@@ -23,6 +24,19 @@ public class PrinterBridge {
 
     public PrinterBridge(Context context) {
         this.context = context.getApplicationContext();
+    }
+
+    /**
+     * Stores the printer address so the background polling service can print
+     * even when the WebView is not running.
+     */
+    @JavascriptInterface
+    public void saveConfig(String ip, int port) {
+        SharedPreferences sp = context.getSharedPreferences(SupabaseConfig.PREFS, Context.MODE_PRIVATE);
+        sp.edit()
+                .putString(SupabaseConfig.KEY_IP, ip == null ? "" : ip.trim())
+                .putInt(SupabaseConfig.KEY_PORT, port > 0 ? port : SupabaseConfig.DEFAULT_PORT)
+                .apply();
     }
 
     @JavascriptInterface

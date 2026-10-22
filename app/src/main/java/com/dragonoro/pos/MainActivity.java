@@ -1,8 +1,11 @@
 package com.dragonoro.pos;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.KeyEvent;
 import android.webkit.WebResourceRequest;
@@ -62,6 +65,25 @@ public class MainActivity extends AppCompatActivity {
         // Append a timestamp so the WebView never serves a stale cached page.
         // This lets every web update reach all installed APPs on next launch.
         webView.loadUrl(START_URL + "?t=" + System.currentTimeMillis());
+
+        requestNotifPermission();
+        startPolling();
+    }
+
+    private void requestNotifPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 100);
+        }
+    }
+
+    private void startPolling() {
+        Intent svc = new Intent(this, OrderPollingService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(svc);
+        } else {
+            startService(svc);
+        }
     }
 
     @Override
