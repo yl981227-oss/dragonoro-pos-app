@@ -188,6 +188,7 @@ public class OrderPollingService extends Service {
             long now = System.currentTimeMillis();
             Long prev = lastAttempt.get(id);
             if (prev != null && now - prev < RETRY_MS) continue;
+            if (!shouldPrintNow(o)) continue;
             lastAttempt.put(id, now);
 
             if (printOrder(o)) {
@@ -199,8 +200,45 @@ public class OrderPollingService extends Service {
         }
     }
 
-    private boolean printOrder(JSONObject o) {
-        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
+    /**
+     * 预定单延迟打印：到「预定时间前 30 分钟」与「当天 12:20 开门」两者较晚的时刻才出票。
+     * 非预定单（即时单）永远返回 true。
+     */
+    private boolean shouldPrintNow(JSONObject o) {
+        String timing = o.optString("timing_info", "");
+        if (timing == null || timing.indexOf("PEDIDO PROGRAMADO") == -1) return true;
+
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(hoy|ma.ana)\\s+a\\s+las\\s+(\\d{1,2}):(\\d{2})")
+                .matcher(timing);
+        if (!m.find()) return true;
+
+        boolean tomorrow = m.group(1).startsWith("ma");
+        int hh;
+        int mm;
+        try {
+            hh = Integer.parseInt(m.group(2));
+            mm = Integer.parseInt(m.group(3));
+        } catch (Exception e) {
+            return true;
+        }
+
+        java.util.Calendar target = java.util.Calendar.getInstance();
+        target.set(java.util.Calendar.HOUR_OF_DAY, hh);
+        target.set(java.util.Calendar.MINUTE, mm);
+        target.set(java.util.Calendar.SECOND, 0);
+        target.set(java.util.Calendar.MILLISECOND, 0);
+        if (tomorrow) target.add(java.util.Calendar.DAY_OF_YEAR, 1);
+
+        java.util.Calendar openTime = (java.util.Calendar) target.clone();
+        openTime.set(java.util.Calendar.HOUR_OF_DAY, 12);
+        openTime.set(java.util.Calendar.MINUTE, 20);
+
+        long printAt = Math.max(target.getTimeInMillis() - 30L * 60L * 1000L, openTime.getTimeInMillis());
+        return System.currentTimeMillis() >= printAt;
+    }
+
+    private boolean printOrder(JSONObject o) {        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
         String ip = sp.getString(SupabaseConfig.KEY_IP, "");
         int port = sp.getInt(SupabaseConfig.KEY_PORT, SupabaseConfig.DEFAULT_PORT);
         if (ip == null || ip.isEmpty()) {
