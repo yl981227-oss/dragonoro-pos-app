@@ -74,6 +74,10 @@ public class OrderPollingService extends Service {
         return null;
     }
 
+    private int tickCount = 0;
+    private int printerFailCount = 0;
+    private boolean printerOffline = false;
+
     private void loop() {
         while (running) {
             try {
@@ -81,12 +85,83 @@ public class OrderPollingService extends Service {
             } catch (Exception e) {
                 Log.w(TAG, "poll error: " + e.getMessage());
             }
+
+            // 每 6 轮（约 30 秒）探一次打印机，连续 3 次失败就告警
+            tickCount++;
+            if (tickCount % 6 == 0) {
+                try {
+                    checkPrinterHealth();
+                } catch (Exception e) {
+                    Log.w(TAG, "printer check error: " + e.getMessage());
+                }
+            }
+
             try {
                 Thread.sleep(POLL_MS);
             } catch (InterruptedException e) {
                 break;
             }
         }
+    }
+
+    private void checkPrinterHealth() {
+        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
+        String ip = sp.getString(SupabaseConfig.KEY_IP, "");
+        int port = sp.getInt(SupabaseConfig.KEY_PORT, SupabaseConfig.DEFAULT_PORT);
+        if (ip == null || ip.isEmpty()) return;
+
+        if (pingPrinter(ip, port)) {
+            if (printerOffline) {
+                printerOffline = false;
+                printerFailCount = 0;
+                notifySimple("Impresora reconectada", "Ya puedes imprimir de nuevo");
+                Log.i(TAG, "printer back online");
+            } else {
+                printerFailCount = 0;
+            }
+        } else {
+            printerFailCount++;
+            if (printerFailCount >= 3 && !printerOffline) {
+                printerOffline = true;
+                notifySimple("Impresora desconectada", "Revisa la red, el cable o el papel");
+                Log.w(TAG, "printer offline after " + printerFailCount + " failures");
+            }
+        }
+    }
+
+    private boolean pingPrinter(String ip, int port) {
+        Socket s = null;
+        try {
+            s = new Socket();
+            s.connect(new InetSocketAddress(ip, port), 3000);
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (s != null) {
+                try {
+                    s.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private void notifySimple(String title, String text) {
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+        Notification.Builder b;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            b = new Notification.Builder(this, CHANNEL_ID);
+        } else {
+            b = new Notification.Builder(this);
+        }
+        nm.notify((int) (System.currentTimeMillis() % 100000),
+                b.setContentTitle(title)
+                        .setContentText(text)
+                        .setSmallIcon(android.R.drawable.stat_notify_error)
+                        .setAutoCancel(true)
+                        .build());
     }
 
     private void pollOnce() throws Exception {
@@ -145,6 +220,11 @@ public class OrderPollingService extends Service {
             return true;
         } catch (Exception e) {
             Log.w(TAG, "print failed: " + e.getMessage());
+            printerFailCount++;
+            if (printerFailCount >= 3 && !printerOffline) {
+                printerOffline = true;
+                notifySimple("Impresora desconectada", "Revisa la red, el cable o el papel");
+            }
             return false;
         } finally {
             if (s != null) {
