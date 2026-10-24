@@ -7,5 +7,7 @@ public class SupabaseConfig {
     public static final String PREFS = "pos";
     public static final String KEY_IP = "printer_ip";
     public static final String KEY_PORT = "printer_port";
+    public static final String KEY_ACCESS_TOKEN = "supabase_access_token";
+    public static final String KEY_REFRESH_TOKEN = "supabase_refresh_token";
     public static final int DEFAULT_PORT = 9100;
 }

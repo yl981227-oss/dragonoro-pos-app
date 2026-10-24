@@ -40,6 +40,15 @@ public class PrinterBridge {
     }
 
     @JavascriptInterface
+    public void saveAuthSession(String accessToken, String refreshToken) {
+        if (accessToken == null || accessToken.trim().isEmpty()) return;
+        SharedPreferences sp = context.getSharedPreferences(SupabaseConfig.PREFS, Context.MODE_PRIVATE);
+        sp.edit().putString(SupabaseConfig.KEY_ACCESS_TOKEN, accessToken.trim())
+                .putString(SupabaseConfig.KEY_REFRESH_TOKEN, refreshToken == null ? "" : refreshToken.trim())
+                .commit();
+    }
+
+    @JavascriptInterface
     public void print(String ip, int port, String base64Data) {
         if (ip == null || base64Data == null || base64Data.isEmpty()) {
             toast("Datos de impresion vacios");

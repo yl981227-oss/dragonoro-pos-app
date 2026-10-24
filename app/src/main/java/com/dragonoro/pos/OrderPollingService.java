@@ -320,6 +320,10 @@ public class OrderPollingService extends Service {
     }
 
     private boolean markPreparing(long id) {
+        return markPreparing(id, true);
+    }
+
+    private boolean markPreparing(long id, boolean allowRefresh) {
         HttpURLConnection c = null;
         try {
             // Never regress a ready/delivered order during a retry.
@@ -330,12 +334,15 @@ public class OrderPollingService extends Service {
             c.setConnectTimeout(8000);
             c.setReadTimeout(8000);
             c.setRequestProperty("apikey", SupabaseConfig.KEY);
-            c.setRequestProperty("Authorization", "Bearer " + SupabaseConfig.KEY);
+            c.setRequestProperty("Authorization", "Bearer " + authToken());
             c.setRequestProperty("Content-Type", "application/json");
             c.setRequestProperty("Prefer", "return=representation");
             byte[] b = "{\"status\":\"preparing\"}".getBytes(StandardCharsets.UTF_8);
             try (OutputStream out = c.getOutputStream()) { out.write(b); }
             int status = c.getResponseCode();
+            if (status == HttpURLConnection.HTTP_UNAUTHORIZED && allowRefresh && refreshAuthToken()) {
+                return markPreparing(id, false);
+            }
             if (status < 200 || status >= 300) throw new java.io.IOException("Status update HTTP " + status);
             if (status == HttpURLConnection.HTTP_NO_CONTENT) {
                 throw new java.io.IOException("Status update returned no row confirmation");
@@ -356,7 +363,47 @@ public class OrderPollingService extends Service {
         }
     }
 
+    private String authToken() {
+        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
+        String token = sp.getString(SupabaseConfig.KEY_ACCESS_TOKEN, "");
+        return token == null || token.isEmpty() ? SupabaseConfig.KEY : token;
+    }
+
+    private boolean refreshAuthToken() {
+        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
+        String refresh = sp.getString(SupabaseConfig.KEY_REFRESH_TOKEN, "");
+        if (refresh == null || refresh.isEmpty()) return false;
+        HttpURLConnection c = null;
+        try {
+            URL url = new URL(SupabaseConfig.URL + "/auth/v1/token?grant_type=refresh_token");
+            c = (HttpURLConnection) url.openConnection();
+            c.setRequestMethod("POST"); c.setDoOutput(true); c.setConnectTimeout(8000); c.setReadTimeout(8000);
+            c.setRequestProperty("apikey", SupabaseConfig.KEY); c.setRequestProperty("Content-Type", "application/json");
+            c.getOutputStream().write(("{\"refresh_token\":\"" + refresh.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}").getBytes(StandardCharsets.UTF_8));
+            if (c.getResponseCode() < 200 || c.getResponseCode() >= 300) return false;
+            JSONObject body = new JSONObject(readAll(c));
+            String access = body.optString("access_token", "");
+            String nextRefresh = body.optString("refresh_token", refresh);
+            if (access.isEmpty()) return false;
+            sp.edit().putString(SupabaseConfig.KEY_ACCESS_TOKEN, access).putString(SupabaseConfig.KEY_REFRESH_TOKEN, nextRefresh).commit();
+            return true;
+        } catch (Exception error) { return false; }
+        finally { if (c != null) c.disconnect(); }
+    }
+
+    private String readAll(HttpURLConnection c) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
+            String line; while ((line = br.readLine()) != null) sb.append(line);
+        }
+        return sb.toString();
+    }
+
     private String httpGet(String urlStr) throws Exception {
+        return httpGet(urlStr, true);
+    }
+
+    private String httpGet(String urlStr, boolean allowRefresh) throws Exception {
         HttpURLConnection c = null;
         try {
             URL url = new URL(urlStr);
@@ -364,16 +411,13 @@ public class OrderPollingService extends Service {
             c.setConnectTimeout(8000);
             c.setReadTimeout(8000);
             c.setRequestProperty("apikey", SupabaseConfig.KEY);
-            c.setRequestProperty("Authorization", "Bearer " + SupabaseConfig.KEY);
+            c.setRequestProperty("Authorization", "Bearer " + authToken());
             int status = c.getResponseCode();
-            if (status < 200 || status >= 300) throw new java.io.IOException("Order query HTTP " + status);
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
+            if (status == HttpURLConnection.HTTP_UNAUTHORIZED && allowRefresh && refreshAuthToken()) {
+                return httpGet(urlStr, false);
             }
-            return sb.toString();
+            if (status < 200 || status >= 300) throw new java.io.IOException("Order query HTTP " + status);
+            return readAll(c);
         } finally {
             if (c != null) c.disconnect();
         }
