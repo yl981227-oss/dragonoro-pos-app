@@ -21,7 +21,9 @@ import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.channels.SocketChannel;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -43,13 +45,26 @@ public class OrderPollingService extends Service {
     private volatile boolean running = true;
     private Thread worker;
 
-    private final Set<Long> handled = new HashSet<>();
     private final Map<Long, Long> lastAttempt = new HashMap<>();
-    private boolean initialized = false;
+    private final Set<Long> issueNotified = new HashSet<>();
+    private PrintJournal journal;
+    private PrintJournalStore journalStore;
+    private static final String ALERT_CHANNEL = "pos_print_issues";
+    private static final int PAGE_SIZE = 100;
+    private long pageCursor = 0;
 
     @Override
     public void onCreate() {
         super.onCreate();
+        journalStore = new PrintJournalStore(this);
+        journal = new PrintJournal(journalStore);
+        // Interrupted writes are uncertain, not automatically retried on startup.
+        for (Map.Entry<String, ?> entry : journalStore.preferences().getAll().entrySet()) {
+            if (entry.getKey().startsWith("state_") && "SENDING".equals(entry.getValue())) {
+                try { journal.uncertain(Long.parseLong(entry.getKey().substring(6))); }
+                catch (NumberFormatException ignored) { }
+            }
+        }
         createChannel();
         startForeground(1, buildNotification("Escuchando pedidos en segundo plano"));
     }
@@ -66,6 +81,7 @@ public class OrderPollingService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        if (worker != null) worker.interrupt();
         super.onDestroy();
     }
 
@@ -123,7 +139,7 @@ public class OrderPollingService extends Service {
             printerFailCount++;
             if (printerFailCount >= 3 && !printerOffline) {
                 printerOffline = true;
-                notifySimple("Impresora desconectada", "Revisa la red, el cable o el papel");
+                notifySimple("Impresora desconectada", "Revisa la conexión y la alimentación. El estado del papel no se detecta por TCP.");
                 Log.w(TAG, "printer offline after " + printerFailCount + " failures");
             }
         }
@@ -152,132 +168,162 @@ public class OrderPollingService extends Service {
         if (nm == null) return;
         Notification.Builder b;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            b = new Notification.Builder(this, CHANNEL_ID);
+            b = new Notification.Builder(this, ALERT_CHANNEL);
         } else {
             b = new Notification.Builder(this);
         }
+        android.app.PendingIntent openApp = android.app.PendingIntent.getActivity(this, 0,
+                new Intent(this, MainActivity.class),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
         nm.notify((int) (System.currentTimeMillis() % 100000),
                 b.setContentTitle(title)
                         .setContentText(text)
+                        .setStyle(new Notification.BigTextStyle().bigText(text))
+                        .setContentIntent(openApp)
                         .setSmallIcon(android.R.drawable.stat_notify_error)
                         .setAutoCancel(true)
                         .build());
     }
 
     private void pollOnce() throws Exception {
-        String body = httpGet(SupabaseConfig.URL
-                + "/rest/v1/orders?status=eq.pending&select=*&order=id.asc&limit=20");
+        // Keyset pagination: a waiting reservation cannot block later immediate orders.
+        String body = httpGet(SupabaseConfig.URL + "/rest/v1/orders?status=eq.pending&select=*"
+                + "&order=id.asc&limit=" + PAGE_SIZE + "&id=gt." + pageCursor);
         JSONArray arr = new JSONArray(body);
+        long nextCursor = pageCursor;
+        for (int i = 0; i < arr.length() && running; i++) {
+            JSONObject order = arr.getJSONObject(i);
+            long id = order.optLong("id", 0);
+            if (id <= nextCursor) throw new IllegalStateException("Invalid order pagination");
+            nextCursor = id;
+            processPendingOrder(order);
+        }
+        pageCursor = arr.length() < PAGE_SIZE ? 0 : nextCursor;
+        // Entries already SENT still need status synchronization even when no longer pending.
+        syncSentJournalEntries();
+        if (lastAttempt.size() > 5000) lastAttempt.clear();
+    }
 
-        if (!initialized) {
-            // First run: treat existing pending orders as already handled so the
-            // app does not dump a pile of old tickets on startup.
-            for (int i = 0; i < arr.length(); i++) {
-                handled.add(arr.getJSONObject(i).optLong("id"));
-            }
-            initialized = true;
-            Log.i(TAG, "initialized, skipped " + arr.length() + " existing pending orders");
+    private void processPendingOrder(JSONObject order) {
+        long id = order.optLong("id", 0);
+        journalStore.remember(id, order.optString("order_code", "Pedido " + id));
+        PrintJournal.State state = journal.state(id);
+        if (state == PrintJournal.State.SYNCED || state == PrintJournal.State.SENT) return;
+        if (state == PrintJournal.State.SENDING || state == PrintJournal.State.UNCERTAIN || state == PrintJournal.State.REVIEW) {
+            notifyIssueOnce(id, "Revisa el pedido y el papel en 'Revisar impresión'. No se reenviará automáticamente.");
             return;
         }
-
-        for (int i = 0; i < arr.length(); i++) {
-            JSONObject o = arr.getJSONObject(i);
-            long id = o.optLong("id");
-            if (handled.contains(id)) continue;
-
-            long now = System.currentTimeMillis();
-            Long prev = lastAttempt.get(id);
-            if (prev != null && now - prev < RETRY_MS) continue;
-            if (!shouldPrintNow(o)) continue;
-            lastAttempt.put(id, now);
-
-            if (printOrder(o)) {
-                handled.add(id);
+        OrderSchedule.Decision decision = OrderSchedule.evaluate(order.optString("timing_info", ""),
+                order.optString("created_at", ""), System.currentTimeMillis());
+        if (state != PrintJournal.State.APPROVED) {
+            if (decision.action == OrderSchedule.Action.WAIT) return;
+            if (decision.action == OrderSchedule.Action.REVIEW) {
+                journal.review(id);
+                notifyIssueOnce(id, decision.reason);
+                return;
+            }
+        }
+        long now = System.currentTimeMillis();
+        Long previous = lastAttempt.get(id);
+        if (previous != null && now - previous < RETRY_MS) return;
+        lastAttempt.put(id, now);
+        if (printOrder(order)) {
+            // Preserve the attempt timestamp on PATCH failure. The end-of-page sync
+            // pass must not immediately bypass the same 20-second retry backoff.
+            if (markPreparing(id)) {
+                journal.synced(id);
                 lastAttempt.remove(id);
-                markPreparing(id);
-                notifyPrinted(o.optString("order_code"));
+            }
+            notifyPrinted(order.optString("order_code"));
+        }
+    }
+
+    private void notifyIssueOnce(long id, String reason) {
+        if (issueNotified.add(id)) notifySimple("Pedido requiere revisión: " + journalStore.code(id), reason);
+    }
+
+    private void syncSentJournalEntries() {
+        for (Map.Entry<String, ?> entry : journalStore.preferences().getAll().entrySet()) {
+            if (!running) return;
+            if (!entry.getKey().startsWith("state_")) continue;
+            long id;
+            try { id = Long.parseLong(entry.getKey().substring(6)); }
+            catch (NumberFormatException ignored) { continue; }
+            PrintJournal.State state = journal.state(id);
+            if (state == PrintJournal.State.UNCERTAIN || state == PrintJournal.State.REVIEW) {
+                notifyIssueOnce(id, "Revisa el papel y confirma la acción en el APP.");
+            }
+            if (state == PrintJournal.State.SENT) {
+                Long last = lastAttempt.get(id);
+                long now = System.currentTimeMillis();
+                if (last != null && now - last < RETRY_MS) continue;
+                lastAttempt.put(id, now);
+                if (markPreparing(id)) { journal.synced(id); lastAttempt.remove(id); }
             }
         }
     }
 
-    /**
-     * 预定单延迟打印：到「预定时间前 30 分钟」与「当天 12:20 开门」两者较晚的时刻才出票。
-     * 非预定单（即时单）永远返回 true。
-     */
-    private boolean shouldPrintNow(JSONObject o) {
-        String timing = o.optString("timing_info", "");
-        if (timing == null || timing.indexOf("PEDIDO PROGRAMADO") == -1) return true;
-
-        java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile("(hoy|ma.ana)\\s+a\\s+las\\s+(\\d{1,2}):(\\d{2})")
-                .matcher(timing);
-        if (!m.find()) return true;
-
-        boolean tomorrow = m.group(1).startsWith("ma");
-        int hh;
-        int mm;
-        try {
-            hh = Integer.parseInt(m.group(2));
-            mm = Integer.parseInt(m.group(3));
-        } catch (Exception e) {
-            return true;
-        }
-
-        java.util.Calendar target = java.util.Calendar.getInstance();
-        target.set(java.util.Calendar.HOUR_OF_DAY, hh);
-        target.set(java.util.Calendar.MINUTE, mm);
-        target.set(java.util.Calendar.SECOND, 0);
-        target.set(java.util.Calendar.MILLISECOND, 0);
-        if (tomorrow) target.add(java.util.Calendar.DAY_OF_YEAR, 1);
-
-        java.util.Calendar openTime = (java.util.Calendar) target.clone();
-        openTime.set(java.util.Calendar.HOUR_OF_DAY, 12);
-        openTime.set(java.util.Calendar.MINUTE, 20);
-
-        long printAt = Math.max(target.getTimeInMillis() - 30L * 60L * 1000L, openTime.getTimeInMillis());
-        return System.currentTimeMillis() >= printAt;
-    }
-
-    private boolean printOrder(JSONObject o) {        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
+    private boolean printOrder(JSONObject order) {
+        SharedPreferences sp = getSharedPreferences(SupabaseConfig.PREFS, MODE_PRIVATE);
         String ip = sp.getString(SupabaseConfig.KEY_IP, "");
         int port = sp.getInt(SupabaseConfig.KEY_PORT, SupabaseConfig.DEFAULT_PORT);
-        if (ip == null || ip.isEmpty()) {
-            Log.w(TAG, "no printer ip configured");
-            return false;
-        }
-        byte[] data = new EscPosBuilder().build(o);
-        Socket s = null;
+        if (ip == null || ip.isEmpty()) return false;
+        long id = order.optLong("id", 0);
+        SocketChannel channel = null;
+        boolean sending = false;
         try {
-            s = new Socket();
-            s.connect(new InetSocketAddress(ip, port), 4000);
-            s.setSoTimeout(4000);
-            OutputStream os = s.getOutputStream();
-            os.write(data);
-            os.flush();
-            Log.i(TAG, "printed " + o.optString("order_code"));
+            byte[] data = new EscPosBuilder().build(order);
+            channel = SocketChannel.open();
+            channel.configureBlocking(false);
+            channel.connect(new InetSocketAddress(ip, port));
+            long deadline = System.nanoTime() + 4_000_000_000L;
+            while (!channel.finishConnect()) {
+                if (System.nanoTime() >= deadline) throw new java.io.IOException("Printer connect timeout");
+                Thread.sleep(20L);
+            }
+            // Fail closed if the local journal cannot be persisted. No bytes have been sent yet.
+            if (!journal.begin(id)) {
+                notifyIssueOnce(id, "No se pudo guardar el registro local. Revisa el almacenamiento.");
+                return false;
+            }
+            sending = true;
+            ByteBuffer buffer = ByteBuffer.wrap(data);
+            while (buffer.hasRemaining()) {
+                int written = channel.write(buffer);
+                if (written < 0) throw new java.io.IOException("Printer closed connection");
+                if (System.nanoTime() >= deadline) throw new java.io.IOException("Printer write timeout");
+                if (written == 0) Thread.sleep(20L);
+            }
+            // SENT means bytes dispatched; NOT proof of physical paper output.
+            if (!journal.sent(id)) {
+                journal.uncertain(id);
+                notifyIssueOnce(id, "Datos enviados pero registro no confirmado. Comprueba el papel antes de repetir.");
+                return false;
+            }
+            printerFailCount = 0;
             return true;
-        } catch (Exception e) {
-            Log.w(TAG, "print failed: " + e.getMessage());
+        } catch (Exception error) {
+            Log.w(TAG, "Printer operation failed: " + error.getClass().getSimpleName());
+            if (sending) {
+                journal.uncertain(id);
+                notifyIssueOnce(id, "Envío interrumpido. Puede existir un ticket parcial; revisa antes de repetir.");
+            }
             printerFailCount++;
             if (printerFailCount >= 3 && !printerOffline) {
                 printerOffline = true;
-                notifySimple("Impresora desconectada", "Revisa la red, el cable o el papel");
+                notifySimple("Impresora desconectada", "Revisa la conexión y la alimentación. El estado del papel no se detecta por TCP.");
             }
             return false;
         } finally {
-            if (s != null) {
-                try {
-                    s.close();
-                } catch (Exception ignored) {
-                }
-            }
+            if (channel != null) try { channel.close(); } catch (Exception ignored) { }
         }
     }
 
-    private void markPreparing(long id) {
+    private boolean markPreparing(long id) {
         HttpURLConnection c = null;
         try {
-            URL url = new URL(SupabaseConfig.URL + "/rest/v1/orders?id=eq." + id);
+            // Never regress a ready/delivered order during a retry.
+            URL url = new URL(SupabaseConfig.URL + "/rest/v1/orders?id=eq." + id + "&status=eq.pending");
             c = (HttpURLConnection) url.openConnection();
             c.setRequestMethod("PATCH");
             c.setDoOutput(true);
@@ -286,12 +332,25 @@ public class OrderPollingService extends Service {
             c.setRequestProperty("apikey", SupabaseConfig.KEY);
             c.setRequestProperty("Authorization", "Bearer " + SupabaseConfig.KEY);
             c.setRequestProperty("Content-Type", "application/json");
-            c.setRequestProperty("Prefer", "return=minimal");
+            c.setRequestProperty("Prefer", "return=representation");
             byte[] b = "{\"status\":\"preparing\"}".getBytes(StandardCharsets.UTF_8);
-            c.getOutputStream().write(b);
-            c.getResponseCode();
+            try (OutputStream out = c.getOutputStream()) { out.write(b); }
+            int status = c.getResponseCode();
+            if (status < 200 || status >= 300) throw new java.io.IOException("Status update HTTP " + status);
+            if (status == HttpURLConnection.HTTP_NO_CONTENT) {
+                throw new java.io.IOException("Status update returned no row confirmation");
+            }
+            StringBuilder response = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) response.append(line);
+            }
+            JSONArray updated = new JSONArray(response.toString());
+            if (updated.length() == 0) throw new java.io.IOException("Order was not pending or update matched zero rows");
+            return true;
         } catch (Exception e) {
-            Log.w(TAG, "mark failed: " + e.getMessage());
+            notifyIssueOnce(id, "Ticket enviado, pero el estado no pudo sincronizarse. Se reintentará sin reimprimir.");
+            return false;
         } finally {
             if (c != null) c.disconnect();
         }
@@ -306,6 +365,8 @@ public class OrderPollingService extends Service {
             c.setReadTimeout(8000);
             c.setRequestProperty("apikey", SupabaseConfig.KEY);
             c.setRequestProperty("Authorization", "Bearer " + SupabaseConfig.KEY);
+            int status = c.getResponseCode();
+            if (status < 200 || status >= 300) throw new java.io.IOException("Order query HTTP " + status);
             StringBuilder sb = new StringBuilder();
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
@@ -324,7 +385,11 @@ public class OrderPollingService extends Service {
                     CHANNEL_ID, "Pedidos", NotificationManager.IMPORTANCE_LOW);
             ch.setDescription("Escucha de pedidos en segundo plano");
             NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.createNotificationChannel(ch);
+            if (nm != null) {
+                nm.createNotificationChannel(ch);
+                nm.createNotificationChannel(new NotificationChannel(ALERT_CHANNEL,
+                        "Alertas de impresión", NotificationManager.IMPORTANCE_HIGH));
+            }
         }
     }
 
@@ -352,7 +417,7 @@ public class OrderPollingService extends Service {
             b = new Notification.Builder(this);
         }
         nm.notify((int) (System.currentTimeMillis() % 100000),
-                b.setContentTitle("Ticket impreso")
+                b.setContentTitle("Ticket enviado a la impresora")
                         .setContentText(code)
                         .setSmallIcon(android.R.drawable.stat_notify_sync)
                         .setAutoCancel(true)

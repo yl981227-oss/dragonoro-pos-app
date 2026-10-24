@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'fix/**' ]
   workflow_dispatch:
 
 jobs:
@@ -36,6 +36,18 @@ jobs:
           done
           echo "platforms available:"
           ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+
+      - name: Run offline Java regressions
+        run: |
+          mkdir -p /tmp/pos-tests
+          javac -encoding UTF-8 -d /tmp/pos-tests app/src/main/java/com/dragonoro/pos/OrderSchedule.java app/src/main/java/com/dragonoro/pos/PrintJournal.java app/src/test/java/com/dragonoro/pos/QueueRegression.java
+          java -cp /tmp/pos-tests com.dragonoro.pos.QueueRegression
+
+      - name: Restore testing signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: pos-debug-signing-v1
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
