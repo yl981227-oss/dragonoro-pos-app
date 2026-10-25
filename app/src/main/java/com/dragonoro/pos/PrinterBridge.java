@@ -43,9 +43,10 @@ public class PrinterBridge {
     public void saveAuthSession(String accessToken, String refreshToken) {
         if (accessToken == null || accessToken.trim().isEmpty()) return;
         SharedPreferences sp = context.getSharedPreferences(SupabaseConfig.PREFS, Context.MODE_PRIVATE);
-        sp.edit().putString(SupabaseConfig.KEY_ACCESS_TOKEN, accessToken.trim())
+        boolean saved = sp.edit().putString(SupabaseConfig.KEY_ACCESS_TOKEN, accessToken.trim())
                 .putString(SupabaseConfig.KEY_REFRESH_TOKEN, refreshToken == null ? "" : refreshToken.trim())
                 .commit();
+        toast(saved ? "后台授权已保存，自动打印已启用" : "后台授权保存失败，请重试登录");
     }
 
     @JavascriptInterface

@@ -93,6 +93,7 @@ public class OrderPollingService extends Service {
     private int tickCount = 0;
     private int printerFailCount = 0;
     private boolean printerOffline = false;
+    private boolean authIssueNotified = false;
 
     private void loop() {
         while (running) {
@@ -100,6 +101,9 @@ public class OrderPollingService extends Service {
                 pollOnce();
             } catch (Exception e) {
                 Log.w(TAG, "poll error: " + e.getMessage());
+                if (e.getMessage() != null && e.getMessage().contains("401")) {
+                    notifyAuthProblem("后台登录已失效。请在 APP 内重新登录员工账号。");
+                }
             }
 
             // 每 6 轮（约 30 秒）探一次打印机，连续 3 次失败就告警
@@ -242,6 +246,12 @@ public class OrderPollingService extends Service {
         if (issueNotified.add(id)) notifySimple("Pedido requiere revisión: " + journalStore.code(id), reason);
     }
 
+    private void notifyAuthProblem(String message) {
+        if (authIssueNotified) return;
+        authIssueNotified = true;
+        notifySimple("China Ideal POS", message);
+    }
+
     private void syncSentJournalEntries() {
         for (Map.Entry<String, ?> entry : journalStore.preferences().getAll().entrySet()) {
             if (!running) return;
@@ -341,7 +351,11 @@ public class OrderPollingService extends Service {
             try (OutputStream out = c.getOutputStream()) { out.write(b); }
             int status = c.getResponseCode();
             if (status == HttpURLConnection.HTTP_UNAUTHORIZED && allowRefresh && refreshAuthToken()) {
+                authIssueNotified = false;
                 return markPreparing(id, false);
+            }
+            if (status == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                notifyAuthProblem("后台登录已失效。请在 APP 内重新登录员工账号。");
             }
             if (status < 200 || status >= 300) throw new java.io.IOException("Status update HTTP " + status);
             if (status == HttpURLConnection.HTTP_NO_CONTENT) {
@@ -414,7 +428,11 @@ public class OrderPollingService extends Service {
             c.setRequestProperty("Authorization", "Bearer " + authToken());
             int status = c.getResponseCode();
             if (status == HttpURLConnection.HTTP_UNAUTHORIZED && allowRefresh && refreshAuthToken()) {
+                authIssueNotified = false;
                 return httpGet(urlStr, false);
+            }
+            if (status == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                notifyAuthProblem("APP 没有有效的员工登录。请在 APP 内登录后台后再接单。");
             }
             if (status < 200 || status >= 300) throw new java.io.IOException("Order query HTTP " + status);
             return readAll(c);
