@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
 public final class OrderSchedule {
     private static final TimeZone SANTIAGO = TimeZone.getTimeZone("America/Santiago");
     private static final int OPEN_MINUTE = 12 * 60 + 20;
+    private static final int PRINT_OPEN_MINUTE = 12 * 60;
     private static final int LAST_PICKUP_MINUTE = 22 * 60 + 50;
     private static final long MINUTE = 60_000L;
     private static final Pattern EXPLICIT_DATE = Pattern.compile("\\[fecha (\\d{4}-\\d{2}-\\d{2}), America/Santiago\\]");
@@ -124,8 +125,8 @@ public final class OrderSchedule {
         if (now > pickupAt + 60 * MINUTE) return review("Reserva vencida. Confirma con el cliente antes de prepararla.");
 
         Calendar opening = calendar(pickupAt);
-        opening.set(Calendar.HOUR_OF_DAY, 12);
-        opening.set(Calendar.MINUTE, 20);
+        opening.set(Calendar.HOUR_OF_DAY, PRINT_OPEN_MINUTE / 60);
+        opening.set(Calendar.MINUTE, PRINT_OPEN_MINUTE % 60);
         opening.set(Calendar.SECOND, 0);
         opening.set(Calendar.MILLISECOND, 0);
         long printAt = Math.max(pickupAt - 30 * MINUTE, opening.getTimeInMillis());

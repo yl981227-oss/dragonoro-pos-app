@@ -50,10 +50,10 @@ public final class QueueRegression {
                 eval(scheduled("2026-10-23", "13:30"), "2026-10-23T05:00:00Z", "2026-10-23T15:59:59Z")));
         test("13:30 pickup releases at 13:00", () -> expect(OrderSchedule.Action.READY,
                 eval(scheduled("2026-10-23", "13:30"), "2026-10-23T05:00:00Z", "2026-10-23T16:00:00Z")));
-        test("12:30 pickup cannot release before 12:20 opening", () -> expect(OrderSchedule.Action.WAIT,
-                eval(scheduled("2026-10-23", "12:30"), "2026-10-23T05:00:00Z", "2026-10-23T15:19:59Z")));
-        test("12:30 pickup releases at 12:20 opening", () -> expect(OrderSchedule.Action.READY,
-                eval(scheduled("2026-10-23", "12:30"), "2026-10-23T05:00:00Z", "2026-10-23T15:20:00Z")));
+        test("12:30 pickup cannot release before 12:00 print opening", () -> expect(OrderSchedule.Action.WAIT,
+                eval(scheduled("2026-10-23", "12:30"), "2026-10-23T05:00:00Z", "2026-10-23T14:59:59Z")));
+        test("12:30 pickup releases at 12:00 print opening", () -> expect(OrderSchedule.Action.READY,
+                eval(scheduled("2026-10-23", "12:30"), "2026-10-23T05:00:00Z", "2026-10-23T15:00:00Z")));
         test("Legacy evening tomorrow anchors to creation date", () -> {
             String line = "Programado: mañana a las 13:30 hrs (PEDIDO PROGRAMADO)";
             OrderSchedule.Decision d = eval(line, "2026-10-24T02:30:00Z", "2026-10-24T16:00:00Z");
@@ -93,10 +93,10 @@ public final class QueueRegression {
                         "2026-10-23T05:00:00Z", "2026-10-23T15:20:00Z"));
             } finally { TimeZone.setDefault(old); }
         });
-        test("Winter UTC-4 opening time", () -> expect(OrderSchedule.Action.READY,
-                eval(scheduled("2026-07-15", "12:30"), "2026-07-15T05:00:00Z", "2026-07-15T16:20:00Z")));
-        test("Summer UTC-3 opening time", () -> expect(OrderSchedule.Action.READY,
-                eval(scheduled("2026-01-15", "12:30"), "2026-01-15T05:00:00Z", "2026-01-15T15:20:00Z")));
+        test("Winter UTC-4 print opening time", () -> expect(OrderSchedule.Action.READY,
+                eval(scheduled("2026-07-15", "12:30"), "2026-07-15T05:00:00Z", "2026-07-15T16:00:00Z")));
+        test("Summer UTC-3 print opening time", () -> expect(OrderSchedule.Action.READY,
+                eval(scheduled("2026-01-15", "12:30"), "2026-01-15T05:00:00Z", "2026-01-15T15:00:00Z")));
         test("Creation timestamp offset and microseconds supported", () -> expect(OrderSchedule.Action.READY,
                 eval(scheduled("2026-10-23", "12:30"), "2026-10-23T02:00:00.123456-03:00", "2026-10-23T15:20:00Z")));
         test("Creation invalid calendar date rejected", () -> expect(OrderSchedule.Action.REVIEW,
