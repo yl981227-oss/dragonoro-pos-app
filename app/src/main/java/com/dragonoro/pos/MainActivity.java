@@ -31,8 +31,10 @@ import androidx.appcompat.app.AppCompatActivity;
 public class MainActivity extends AppCompatActivity {
 
     private static final String START_URL =
-            "https://yl981227-oss.github.io/my-menu/admin.html";
-    private static final String ALLOWED_HOST = "yl981227-oss.github.io";
+            "https://www.chinaideal.cl/admin.html";
+    private static final String LEGACY_HOST = "yl981227-oss.github.io";
+    private static final String CUSTOM_HOST = "www.chinaideal.cl";
+    private static final String ROOT_HOST = "chinaideal.cl";
 
     private WebView webView;
 
@@ -66,8 +68,7 @@ public class MainActivity extends AppCompatActivity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
                 Uri destination = request.getUrl();
-                if ("https".equals(destination.getScheme()) && ALLOWED_HOST.equals(destination.getHost())
-                        && destination.getPath() != null && destination.getPath().startsWith("/my-menu/")) {
+                if (isInternalUrl(destination)) {
                     return false;
                 }
                 // External links (WhatsApp, maps, etc.) go to the system handler.
@@ -79,12 +80,29 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // Keep the last installed WebView compatible with the old GitHub Pages URL,
+        // while loading the current custom-domain origin by default.
         // Append a timestamp so the WebView never serves a stale cached page.
         // This lets every web update reach all installed APPs on next launch.
         webView.loadUrl(START_URL + "?t=" + System.currentTimeMillis());
 
         requestNotifPermission();
         startPolling();
+    }
+
+    private boolean isInternalUrl(Uri uri) {
+        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())) return false;
+        String host = uri.getHost();
+        if (host == null) return false;
+        boolean allowedHost = CUSTOM_HOST.equalsIgnoreCase(host)
+                || ROOT_HOST.equalsIgnoreCase(host)
+                || LEGACY_HOST.equalsIgnoreCase(host);
+        if (!allowedHost) return false;
+        String path = uri.getPath();
+        if (path == null) return false;
+        return ROOT_HOST.equalsIgnoreCase(host)
+                ? (path.equals("/") || path.startsWith("/admin.html") || path.startsWith("/dashboard.html") || path.startsWith("/instalar.html"))
+                : (path.startsWith("/my-menu/") || path.equals("/admin.html") || path.equals("/dashboard.html") || path.equals("/instalar.html"));
     }
 
     private void showPrintIssues() {
