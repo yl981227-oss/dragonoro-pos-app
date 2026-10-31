@@ -3,7 +3,11 @@ name: Build APK
 on:
   push:
     branches: [ main, 'fix/**' ]
+    tags: [ 'v*' ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -52,9 +56,20 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
+      - name: Prepare APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChinaIdealPOS-v1.9.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/ChinaIdealPOS-v1.9.apk
           if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: China Ideal POS ${{ github.ref_name }}
+          generate_release_notes: true
+          files: app/build/outputs/apk/debug/ChinaIdealPOS-v1.9.apk
